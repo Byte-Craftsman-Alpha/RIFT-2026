@@ -9,8 +9,9 @@ export type ExportSuspiciousAccount = {
 
 export type ExportFraudRing = {
   ring_id: string;
-  member_accounts: string[];
-  pattern_type: string;
+  pattern: string;
+  involved_accounts: string[];
+  total_amount: number;
   risk_score: number;
 };
 
@@ -27,10 +28,11 @@ export type ExportJson = {
   summary: ExportSummary;
 };
 
-function mapPatternType(r: FraudRing): string {
-  if (r.pattern_type === "circular_routing") return "cycle";
-  if (r.pattern_type === "smurfing" || r.pattern_type === "dispersal") return "smurfing";
-  if (r.pattern_type === "layered_shell") return "layered_shell";
+function mapPatternLabel(r: FraudRing): string {
+  if (r.pattern_type === "circular_routing") return "Circular Fund Routing";
+  if (r.pattern_type === "smurfing") return "Smurfing (Fan-in)";
+  if (r.pattern_type === "dispersal") return "Smurfing (Fan-out)";
+  if (r.pattern_type === "layered_shell") return "Layered Shell Network";
   return r.pattern_type;
 }
 
@@ -40,16 +42,9 @@ function baseSmurfRisk(r: FraudRing) {
 }
 
 function detectedPatternsForRing(r: FraudRing): string[] {
-  if (r.pattern_type === "circular_routing") {
-    return [`cycle_length_${r.member_count}`];
-  }
-  if (r.pattern_type === "smurfing" || r.pattern_type === "dispersal") {
-    const patterns: string[] = ["smurfing"];
-    if (r.pattern_type === "smurfing" && r.risk_score > baseSmurfRisk(r) + 5) patterns.push("high_velocity");
-    return patterns;
-  }
-  if (r.pattern_type === "layered_shell") return ["layered_shell"];
-  return [];
+  const p = mapPatternLabel(r);
+  void baseSmurfRisk;
+  return [p];
 }
 
 function scoreFloat(n: number): number {
@@ -61,8 +56,9 @@ export function buildExportJson(params: {
   report: AnalysisReport;
   totalAccountsAnalyzed: number;
   processingTimeSeconds: number;
+  txAmountById?: Map<string, number>;
 }): ExportJson {
-  const { report, totalAccountsAnalyzed, processingTimeSeconds } = params;
+  const { report, totalAccountsAnalyzed, processingTimeSeconds, txAmountById } = params;
 
   const accountToRings = new Map<string, FraudRing[]>();
   for (const ring of report.fraud_rings) {
@@ -73,12 +69,19 @@ export function buildExportJson(params: {
     }
   }
 
-  const fraud_rings: ExportFraudRing[] = report.fraud_rings.map((r) => ({
-    ring_id: r.id,
-    member_accounts: r.members,
-    pattern_type: mapPatternType(r),
-    risk_score: scoreFloat(r.risk_score),
-  }));
+  const fraud_rings: ExportFraudRing[] = report.fraud_rings.map((r) => {
+    let total_amount = 0;
+    if (txAmountById) {
+      for (const txId of r.evidence.transaction_ids) total_amount += txAmountById.get(txId) ?? 0;
+    }
+    return {
+      ring_id: r.id,
+      pattern: mapPatternLabel(r),
+      involved_accounts: r.members,
+      total_amount: Math.round(total_amount * 100) / 100,
+      risk_score: scoreFloat(r.risk_score),
+    };
+  });
 
   const suspicious_accounts: ExportSuspiciousAccount[] = report.suspicious_accounts
     .map((a) => {
@@ -90,9 +93,9 @@ export function buildExportJson(params: {
         for (const p of detectedPatternsForRing(r)) patterns.add(p);
       }
       if (patterns.size === 0) {
-        if (a.flags.cycle) patterns.add("cycle_length_3");
-        if (a.flags.smurfing) patterns.add("smurfing");
-        if (a.flags.layering) patterns.add("layered_shell");
+        if (a.flags.cycle) patterns.add("Circular Fund Routing");
+        if (a.flags.smurfing) patterns.add("Smurfing (Fan-in)");
+        if (a.flags.layering) patterns.add("Layered Shell Network");
       }
 
       return {

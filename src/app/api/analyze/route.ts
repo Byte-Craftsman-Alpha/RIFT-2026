@@ -29,11 +29,15 @@ export async function POST(req: Request) {
 
     const timeline = rows.slice().sort((a, b) => a.timestamp - b.timestamp);
 
+    const txAmountById = new Map<string, number>();
+    for (const r of rows) txAmountById.set(r.transaction_id, r.amount);
+
     const processingTimeSeconds = (performance.now() - t0) / 1000;
     const export_json = buildExportJson({
       report: result.report,
       totalAccountsAnalyzed: result.graph.nodes.length,
       processingTimeSeconds,
+      txAmountById,
     });
 
     return NextResponse.json(

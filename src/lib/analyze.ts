@@ -88,8 +88,8 @@ export function analyzeTransactions(rows: TxRow[]) {
   const smurfRolesByAccount = new Map<string, Set<SmurfRole>>();
   for (const r of allRings) {
     if (r.pattern_type !== "smurfing") continue;
-    const agg = r.members[0];
-    const meta = (r.evidence as { roles?: { senders?: string[]; receivers?: string[] } }).roles;
+    const meta = (r.evidence as { roles?: { aggregator?: string; senders?: string[]; receivers?: string[] } }).roles;
+    const agg = meta?.aggregator ?? r.members[r.members.length - 1];
     const senders = meta?.senders ?? [];
     const receivers = meta?.receivers ?? [];
 
@@ -104,7 +104,7 @@ export function analyzeTransactions(rows: TxRow[]) {
   }
 
   for (const [id, f] of accountFlags.entries()) {
-    let s = (f.cycle ? 45 : 0) + (f.layering ? 40 : 0);
+    let s = (f.cycle ? 80 : 0) + (f.layering ? 40 : 0);
     const roles = smurfRolesByAccount.get(id);
     if (roles?.has("aggregator")) s += 50;
     else if (roles?.has("sender")) s += 25;
@@ -189,24 +189,27 @@ function detectCycles(outAdj: Map<string, AdjTx[]>) {
     const path: string[] = [start];
     const txPath: string[] = [];
 
-    const dfs = (current: string, depth: number) => {
+    const dfs = (current: string, depth: number, firstTs: number, lastTs: number) => {
       if (depth > 5) return;
       const outs = outAdj.get(current);
       if (!outs) return;
 
       for (const e of outs) {
         const next = e.to;
+        if (e.ts < lastTs) continue;
         if (next === start && depth >= 3 && depth <= 5) {
           const cycleNodes = [...path, start];
           const sig = canonicalCycle(cycleNodes);
           if (sig && !seen.has(sig)) {
             seen.add(sig);
+            const span = firstTs === Number.POSITIVE_INFINITY ? 0 : Math.max(0, e.ts - firstTs);
+            const within24h = span <= 24 * 60 * 60 * 1000;
             rings.push({
               id: deterministicRingId(`cycle|${sig}`),
               pattern_type: "circular_routing",
               members: cycleNodes.slice(0, -1),
               member_count: cycleNodes.length - 1,
-              risk_score: 70 + (cycleNodes.length - 1) * 5,
+              risk_score: 80 + (cycleNodes.length - 1) * 5 + (within24h ? 5 : 0),
               evidence: {
                 transaction_ids: [...txPath, e.txId],
                 hops: cycleNodes.length - 1,
@@ -221,13 +224,14 @@ function detectCycles(outAdj: Map<string, AdjTx[]>) {
 
         path.push(next);
         txPath.push(e.txId);
-        dfs(next, depth + 1);
+        const nextFirst = firstTs === Number.POSITIVE_INFINITY ? e.ts : firstTs;
+        dfs(next, depth + 1, nextFirst, e.ts);
         path.pop();
         txPath.pop();
       }
     };
 
-    dfs(start, 1);
+    dfs(start, 1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY);
   }
 
   return rings;
@@ -317,87 +321,55 @@ function computeBetweennessCentrality(outAdj: Map<string, AdjTx[]>, nNodes: numb
   return bc;
 }
 
-function detectSmurfing(outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]>) {
+function detectSmurfing(_outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]>) {
   const WINDOW_MS = 72 * 60 * 60 * 1000;
   const IN_UNIQUE_MIN = 10;
-  const OUT_UNIQUE_MIN = 5;
-  const LAG_MS = 24 * 60 * 60 * 1000;
-  const VELOCITY_HOURS = 6;
   const rings: FraudRing[] = [];
 
-  for (const account of new Set<string>([...outAdj.keys(), ...inAdj.keys()])) {
-    const ins = (inAdj.get(account) ?? []).slice();
-    const outs = (outAdj.get(account) ?? []).slice();
-    if (ins.length < IN_UNIQUE_MIN || outs.length < OUT_UNIQUE_MIN) continue;
+  for (const [receiver, insRaw] of inAdj.entries()) {
+    const ins = insRaw.slice();
+    if (ins.length < IN_UNIQUE_MIN) continue;
 
-    let iL = 0;
-    let iR = 0;
-    const sendersFreq = new Map<string, number>();
+    let left = 0;
+    const freq = new Map<string, number>();
 
-    const advanceInR = (idx: number) => {
-      const tx = ins[idx]!;
-      const cp = tx.to;
-      sendersFreq.set(cp, (sendersFreq.get(cp) ?? 0) + 1);
-    };
-    const retractInL = (idx: number) => {
-      const tx = ins[idx]!;
-      const cp = tx.to;
-      const n = (sendersFreq.get(cp) ?? 0) - 1;
-      if (n <= 0) sendersFreq.delete(cp);
-      else sendersFreq.set(cp, n);
-    };
+    for (let right = 0; right < ins.length; right++) {
+      const tx = ins[right]!;
+      freq.set(tx.to, (freq.get(tx.to) ?? 0) + 1);
 
-    while (iL < ins.length) {
-      const startTs = ins[iL]!.ts;
-      const endTs = startTs + WINDOW_MS;
-
-      while (iR < ins.length && ins[iR]!.ts <= endTs) {
-        advanceInR(iR);
-        iR += 1;
+      while (ins[right]!.ts - ins[left]!.ts > WINDOW_MS) {
+        const old = ins[left]!;
+        const n = (freq.get(old.to) ?? 0) - 1;
+        if (n <= 0) freq.delete(old.to);
+        else freq.set(old.to, n);
+        left += 1;
       }
 
-      const uniqueSenders = Array.from(sendersFreq.keys());
-      if (uniqueSenders.length >= IN_UNIQUE_MIN) {
-        const outsInWindow = outs.filter((t) => t.ts >= startTs && t.ts <= endTs);
-        const receiverSet = new Set<string>(outsInWindow.map((t) => t.to));
-        if (receiverSet.size >= OUT_UNIQUE_MIN) {
-          const firstIn = startTs;
-          const firstOutTx = outsInWindow.find((t) => t.ts >= firstIn);
-          if (firstOutTx && firstOutTx.ts - firstIn <= LAG_MS) {
-            const receivers = Array.from(receiverSet.values());
-            const members = [account, ...uniqueSenders.slice().sort(), ...receivers.slice().sort()];
-            const txIds = [...ins.slice(iL, iR).map((t) => t.txId), ...outsInWindow.map((t) => t.txId)];
+      if (freq.size >= IN_UNIQUE_MIN) {
+        const senders = Array.from(freq.keys()).slice().sort();
+        const windowTx = ins.slice(left, right + 1);
+        const startTs = windowTx[0]?.ts;
+        const endTs = windowTx[windowTx.length - 1]?.ts;
+        const txIds = windowTx.map((t) => t.txId);
+        const members = [...senders, receiver];
+        const totalIn = windowTx.reduce((acc, t) => acc + t.amount, 0);
 
-            const incomingSum = ins.slice(iL, iR).reduce((acc, t) => acc + t.amount, 0);
-            const outEnd = outsInWindow.length ? outsInWindow[outsInWindow.length - 1]!.ts : firstOutTx.ts;
-            const horizon = outEnd + VELOCITY_HOURS * 60 * 60 * 1000;
-            let outFast = 0;
-            for (const ot of outs) {
-              if (ot.ts >= outEnd && ot.ts <= horizon) outFast += ot.amount;
-            }
-            const velocityBoost = incomingSum > 0 && outFast / incomingSum >= 0.9 ? 15 : 0;
-
-            rings.push({
-              id: deterministicRingId(
-                `smurf|${account}|${uniqueSenders.slice().sort().join(",")}|${receivers.slice().sort().join(",")}|${startTs}|${endTs}`,
-              ),
-              pattern_type: "smurfing",
-              members,
-              member_count: members.length,
-              risk_score: 70 + Math.min(20, uniqueSenders.length) + Math.min(10, receivers.length) + velocityBoost,
-              evidence: {
-                transaction_ids: Array.from(new Set(txIds)),
-                start_timestamp: startTs,
-                end_timestamp: endTs,
-                roles: { senders: uniqueSenders.slice().sort(), receivers: receivers.slice().sort() },
-              } as FraudRing["evidence"] & { roles: { senders: string[]; receivers: string[] } },
-            });
-          }
-        }
+        rings.push({
+          id: deterministicRingId(`fanin|${receiver}|${senders.join(",")}|${startTs ?? ""}|${endTs ?? ""}`),
+          pattern_type: "smurfing",
+          members,
+          member_count: members.length,
+          risk_score: 80 + Math.min(20, senders.length),
+          evidence: {
+            transaction_ids: Array.from(new Set(txIds)),
+            start_timestamp: startTs,
+            end_timestamp: endTs,
+            total_amount: totalIn,
+            roles: { aggregator: receiver, senders },
+          } as FraudRing["evidence"] & { roles: { aggregator: string; senders: string[] } },
+        });
+        break;
       }
-
-      retractInL(iL);
-      iL += 1;
     }
   }
 
