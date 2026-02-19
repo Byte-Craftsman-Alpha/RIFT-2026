@@ -25,7 +25,7 @@ export type GraphEdge = {
 
 export type FraudRing = {
   id: string;
-  pattern_type: "circular_routing" | "smurfing" | "layered_shell";
+  pattern_type: "circular_routing" | "smurfing" | "dispersal" | "layered_shell";
   members: string[];
   member_count: number;
   risk_score: number;

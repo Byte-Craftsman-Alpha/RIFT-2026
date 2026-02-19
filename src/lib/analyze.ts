@@ -63,7 +63,7 @@ export function analyzeTransactions(rows: TxRow[]) {
   const smurfRings = detectSmurfing(outAdj, inAdj);
   const layerRings = detectLayering(outAdj, accountStats);
 
-  const allRings = [...cycleRings, ...smurfRings, ...layerRings];
+  const allRings = dedupeRings([...cycleRings, ...smurfRings, ...layerRings]);
 
   const accountFlags = new Map<string, { cycle: boolean; smurfing: boolean; layering: boolean }>();
   for (const st of accountStats.keys()) {
@@ -73,7 +73,7 @@ export function analyzeTransactions(rows: TxRow[]) {
     for (const m of ring.members) {
       const f = accountFlags.get(m) ?? { cycle: false, smurfing: false, layering: false };
       if (ring.pattern_type === "circular_routing") f.cycle = true;
-      if (ring.pattern_type === "smurfing") f.smurfing = true;
+      if (ring.pattern_type === "smurfing" || ring.pattern_type === "dispersal") f.smurfing = true;
       if (ring.pattern_type === "layered_shell") f.layering = true;
       accountFlags.set(m, f);
     }
@@ -108,6 +108,36 @@ export function analyzeTransactions(rows: TxRow[]) {
     graph: { nodes, edges },
     report: { suspicious_accounts, fraud_rings },
   };
+}
+
+function memberSetKey(members: string[]) {
+  return members.slice().sort().join("|");
+}
+
+function patternPriority(p: FraudRing["pattern_type"]) {
+  if (p === "circular_routing") return 4;
+  if (p === "smurfing" || p === "dispersal") return 3;
+  if (p === "layered_shell") return 2;
+  return 1;
+}
+
+function dedupeRings(rings: FraudRing[]) {
+  const bestByMembers = new Map<string, FraudRing>();
+  for (const r of rings) {
+    const key = memberSetKey(r.members);
+    const prev = bestByMembers.get(key);
+    if (!prev) {
+      bestByMembers.set(key, r);
+      continue;
+    }
+
+    const pa = patternPriority(prev.pattern_type);
+    const pb = patternPriority(r.pattern_type);
+    if (pb > pa || (pb === pa && r.risk_score > prev.risk_score)) {
+      bestByMembers.set(key, r);
+    }
+  }
+  return Array.from(bestByMembers.values());
 }
 
 function detectCycles(outAdj: Map<string, AdjTx[]>) {
@@ -190,10 +220,11 @@ function detectSmurfing(outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]
       }
 
       if (freq.size >= THRESH) {
-        const members = mode === "fan_out" ? [account, ...Array.from(freq.keys()).slice(0, THRESH)] : [...Array.from(freq.keys()).slice(0, THRESH), account];
+        const counterparties = Array.from(freq.keys());
+        const members = mode === "fan_out" ? [account, ...counterparties] : [...counterparties, account];
         rings.push({
           id: ringId("smurf"),
-          pattern_type: "smurfing",
+          pattern_type: mode === "fan_out" ? "dispersal" : "smurfing",
           members,
           member_count: members.length,
           risk_score: 60 + Math.min(20, freq.size),
@@ -251,7 +282,7 @@ function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { total
         const okIntermediates = intermediates.length >= 2 && intermediates.every((x) => low.has(x));
 
         if (hops >= 3 && okIntermediates) {
-          const sig = `${start}::${next}::${intermediates.join(",")}`;
+          const sig = memberSetKey(path);
           if (!seen.has(sig)) {
             seen.add(sig);
             rings.push({

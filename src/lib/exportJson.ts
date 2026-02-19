@@ -34,6 +34,7 @@ function mapPatternType(r: FraudRing): string {
 function mapDetectedPattern(r: FraudRing): string {
   if (r.pattern_type === "circular_routing") return "cycle";
   if (r.pattern_type === "smurfing") return "smurfing";
+  if (r.pattern_type === "dispersal") return "dispersal";
   if (r.pattern_type === "layered_shell") return "layered_shell";
   return r.pattern_type;
 }
