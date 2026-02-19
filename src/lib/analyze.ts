@@ -16,6 +16,8 @@ type AccountStats = {
   outSum: number;
 };
 
+type SmurfRole = "aggregator" | "sender" | "receiver";
+
 export function analyzeTransactions(rows: TxRow[]) {
   const outAdj = new Map<string, AdjTx[]>();
   const inAdj = new Map<string, AdjTx[]>();
@@ -65,6 +67,8 @@ export function analyzeTransactions(rows: TxRow[]) {
 
   const allRings = dedupeRings([...cycleRings, ...smurfRings, ...layerRings]);
 
+  const centrality = computeBetweennessCentrality(outAdj, accountStats.size);
+
   const accountFlags = new Map<string, { cycle: boolean; smurfing: boolean; layering: boolean }>();
   for (const st of accountStats.keys()) {
     accountFlags.set(st, { cycle: false, smurfing: false, layering: false });
@@ -80,9 +84,43 @@ export function analyzeTransactions(rows: TxRow[]) {
   }
 
   const accountScores = new Map<string, number>();
+
+  const smurfRolesByAccount = new Map<string, Set<SmurfRole>>();
+  for (const r of allRings) {
+    if (r.pattern_type !== "smurfing") continue;
+    const agg = r.members[0];
+    const meta = (r.evidence as { roles?: { senders?: string[]; receivers?: string[] } }).roles;
+    const senders = meta?.senders ?? [];
+    const receivers = meta?.receivers ?? [];
+
+    const addRole = (id: string, role: SmurfRole) => {
+      const set = smurfRolesByAccount.get(id) ?? new Set<SmurfRole>();
+      set.add(role);
+      smurfRolesByAccount.set(id, set);
+    };
+    if (typeof agg === "string") addRole(agg, "aggregator");
+    for (const s of senders) addRole(s, "sender");
+    for (const x of receivers) addRole(x, "receiver");
+  }
+
   for (const [id, f] of accountFlags.entries()) {
-    const s = (f.cycle ? 45 : 0) + (f.smurfing ? 35 : 0) + (f.layering ? 40 : 0);
-    accountScores.set(id, s);
+    let s = (f.cycle ? 45 : 0) + (f.layering ? 40 : 0);
+    const roles = smurfRolesByAccount.get(id);
+    if (roles?.has("aggregator")) s += 50;
+    else if (roles?.has("sender")) s += 25;
+    else if (roles?.has("receiver")) s += 10;
+    else if (f.smurfing) s += 25;
+
+    const c = centrality.get(id) ?? 0;
+    const stats = accountStats.get(id);
+    const deg = stats ? stats.inCount + stats.outCount : 0;
+    if (deg <= 6) {
+      s += Math.min(20, Math.round(c * 100 * 0.2));
+    } else {
+      s += Math.min(10, Math.round(c * 100 * 0.1));
+    }
+
+    accountScores.set(id, Math.max(0, Math.min(100, s)));
   }
 
   const suspicious_accounts: AnalysisReport["suspicious_accounts"] = Array.from(accountScores.entries())
@@ -99,6 +137,7 @@ export function analyzeTransactions(rows: TxRow[]) {
   const nodes: GraphNode[] = Array.from(accountStats.keys()).map((id) => ({
     id,
     score: accountScores.get(id) ?? 0,
+    centrality: centrality.get(id) ?? 0,
     flags: accountFlags.get(id) ?? { cycle: false, smurfing: false, layering: false },
   }));
 
@@ -194,109 +233,185 @@ function detectCycles(outAdj: Map<string, AdjTx[]>) {
   return rings;
 }
 
+function computeBetweennessCentrality(outAdj: Map<string, AdjTx[]>, nNodes: number) {
+  const MAX_NODES = 2000;
+  const bc = new Map<string, number>();
+  if (nNodes === 0) return bc;
+  if (nNodes > MAX_NODES) {
+    for (const v of outAdj.keys()) bc.set(v, 0);
+    return bc;
+  }
+
+  const nodes = new Set<string>();
+  for (const [s, outs] of outAdj.entries()) {
+    nodes.add(s);
+    for (const e of outs) nodes.add(e.to);
+  }
+  const adj = new Map<string, string[]>();
+  for (const v of nodes) adj.set(v, []);
+  for (const [s, outs] of outAdj.entries()) {
+    const list = adj.get(s) ?? [];
+    const seen = new Set<string>();
+    for (const e of outs) {
+      if (!seen.has(e.to)) {
+        seen.add(e.to);
+        list.push(e.to);
+      }
+    }
+    adj.set(s, list);
+  }
+
+  for (const v of nodes) bc.set(v, 0);
+
+  for (const s of nodes) {
+    const S: string[] = [];
+    const P = new Map<string, string[]>();
+    const sigma = new Map<string, number>();
+    const dist = new Map<string, number>();
+
+    for (const v of nodes) {
+      P.set(v, []);
+      sigma.set(v, 0);
+      dist.set(v, -1);
+    }
+    sigma.set(s, 1);
+    dist.set(s, 0);
+
+    const Q: string[] = [s];
+    for (let qh = 0; qh < Q.length; qh++) {
+      const v = Q[qh]!;
+      S.push(v);
+      const vDist = dist.get(v)!;
+      for (const w of adj.get(v) ?? []) {
+        if (dist.get(w)! < 0) {
+          Q.push(w);
+          dist.set(w, vDist + 1);
+        }
+        if (dist.get(w) === vDist + 1) {
+          sigma.set(w, (sigma.get(w) ?? 0) + (sigma.get(v) ?? 0));
+          (P.get(w) ?? []).push(v);
+        }
+      }
+    }
+
+    const delta = new Map<string, number>();
+    for (const v of nodes) delta.set(v, 0);
+    for (let i = S.length - 1; i >= 0; i--) {
+      const w = S[i]!;
+      for (const v of P.get(w) ?? []) {
+        const sv = sigma.get(v) ?? 0;
+        const sw = sigma.get(w) ?? 0;
+        if (sw > 0) {
+          delta.set(v, (delta.get(v) ?? 0) + (sv / sw) * (1 + (delta.get(w) ?? 0)));
+        }
+      }
+      if (w !== s) bc.set(w, (bc.get(w) ?? 0) + (delta.get(w) ?? 0));
+    }
+  }
+
+  let max = 0;
+  for (const v of bc.values()) if (v > max) max = v;
+  if (max > 0) {
+    for (const [k, v] of bc.entries()) bc.set(k, v / max);
+  }
+  return bc;
+}
+
 function detectSmurfing(outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]>) {
   const WINDOW_MS = 72 * 60 * 60 * 1000;
-  const THRESH = 10;
-  const SMALL_TX_THRESHOLD = 1000;
-  const SMALL_TX_RATIO = 0.7;
+  const IN_UNIQUE_MIN = 10;
+  const OUT_UNIQUE_MIN = 5;
+  const LAG_MS = 24 * 60 * 60 * 1000;
   const VELOCITY_HOURS = 6;
   const rings: FraudRing[] = [];
 
-  const detect = (account: string, list: AdjTx[], mode: "fan_out" | "fan_in") => {
-    let left = 0;
-    const freq = new Map<string, number>();
-    const cpSmallCount = new Map<string, number>();
+  for (const account of new Set<string>([...outAdj.keys(), ...inAdj.keys()])) {
+    const ins = (inAdj.get(account) ?? []).slice();
+    const outs = (outAdj.get(account) ?? []).slice();
+    if (ins.length < IN_UNIQUE_MIN || outs.length < OUT_UNIQUE_MIN) continue;
 
-    for (let right = 0; right < list.length; right++) {
-      const tx = list[right];
-      const counterparty = tx.to;
-      freq.set(counterparty, (freq.get(counterparty) ?? 0) + 1);
+    let iL = 0;
+    let iR = 0;
+    const sendersFreq = new Map<string, number>();
 
-      if (tx.amount <= SMALL_TX_THRESHOLD) {
-        cpSmallCount.set(counterparty, (cpSmallCount.get(counterparty) ?? 0) + 1);
+    const advanceInR = (idx: number) => {
+      const tx = ins[idx]!;
+      const cp = tx.to;
+      sendersFreq.set(cp, (sendersFreq.get(cp) ?? 0) + 1);
+    };
+    const retractInL = (idx: number) => {
+      const tx = ins[idx]!;
+      const cp = tx.to;
+      const n = (sendersFreq.get(cp) ?? 0) - 1;
+      if (n <= 0) sendersFreq.delete(cp);
+      else sendersFreq.set(cp, n);
+    };
+
+    while (iL < ins.length) {
+      const startTs = ins[iL]!.ts;
+      const endTs = startTs + WINDOW_MS;
+
+      while (iR < ins.length && ins[iR]!.ts <= endTs) {
+        advanceInR(iR);
+        iR += 1;
       }
 
-      while (list[right].ts - list[left].ts > WINDOW_MS) {
-        const old = list[left];
-        const oldCp = old.to;
-        const n = (freq.get(oldCp) ?? 0) - 1;
-        if (n <= 0) freq.delete(oldCp);
-        else freq.set(oldCp, n);
+      const uniqueSenders = Array.from(sendersFreq.keys());
+      if (uniqueSenders.length >= IN_UNIQUE_MIN) {
+        const outsInWindow = outs.filter((t) => t.ts >= startTs && t.ts <= endTs);
+        const receiverSet = new Set<string>(outsInWindow.map((t) => t.to));
+        if (receiverSet.size >= OUT_UNIQUE_MIN) {
+          const firstIn = startTs;
+          const firstOutTx = outsInWindow.find((t) => t.ts >= firstIn);
+          if (firstOutTx && firstOutTx.ts - firstIn <= LAG_MS) {
+            const receivers = Array.from(receiverSet.values());
+            const members = [account, ...uniqueSenders.slice().sort(), ...receivers.slice().sort()];
+            const txIds = [...ins.slice(iL, iR).map((t) => t.txId), ...outsInWindow.map((t) => t.txId)];
 
-        if (old.amount <= SMALL_TX_THRESHOLD) {
-          const sn = (cpSmallCount.get(oldCp) ?? 0) - 1;
-          if (sn <= 0) cpSmallCount.delete(oldCp);
-          else cpSmallCount.set(oldCp, sn);
+            const incomingSum = ins.slice(iL, iR).reduce((acc, t) => acc + t.amount, 0);
+            const outEnd = outsInWindow.length ? outsInWindow[outsInWindow.length - 1]!.ts : firstOutTx.ts;
+            const horizon = outEnd + VELOCITY_HOURS * 60 * 60 * 1000;
+            let outFast = 0;
+            for (const ot of outs) {
+              if (ot.ts >= outEnd && ot.ts <= horizon) outFast += ot.amount;
+            }
+            const velocityBoost = incomingSum > 0 && outFast / incomingSum >= 0.9 ? 15 : 0;
+
+            rings.push({
+              id: deterministicRingId(
+                `smurf|${account}|${uniqueSenders.slice().sort().join(",")}|${receivers.slice().sort().join(",")}|${startTs}|${endTs}`,
+              ),
+              pattern_type: "smurfing",
+              members,
+              member_count: members.length,
+              risk_score: 70 + Math.min(20, uniqueSenders.length) + Math.min(10, receivers.length) + velocityBoost,
+              evidence: {
+                transaction_ids: Array.from(new Set(txIds)),
+                start_timestamp: startTs,
+                end_timestamp: endTs,
+                roles: { senders: uniqueSenders.slice().sort(), receivers: receivers.slice().sort() },
+              } as FraudRing["evidence"] & { roles: { senders: string[]; receivers: string[] } },
+            });
+          }
         }
-        left += 1;
       }
 
-      if (freq.size >= THRESH) {
-        if (mode === "fan_in") {
-          // Structuring bias: require most counterparties in-window are sending small transfers.
-          let smallCps = 0;
-          for (const cp of freq.keys()) {
-            if ((cpSmallCount.get(cp) ?? 0) > 0) smallCps += 1;
-          }
-          const ratio = freq.size === 0 ? 0 : smallCps / freq.size;
-          if (ratio < SMALL_TX_RATIO) {
-            continue;
-          }
-        }
-
-        const counterparties = Array.from(freq.keys());
-        const members = mode === "fan_out" ? [account, ...counterparties] : [...counterparties, account];
-
-        const windowTx = list.slice(left, right + 1);
-        const startTs = windowTx[0]?.ts;
-        const endTs = windowTx[windowTx.length - 1]?.ts;
-        const incomingSum = windowTx.reduce((acc, t) => acc + t.amount, 0);
-
-        let velocityBoost = 0;
-        if (mode === "fan_in" && typeof endTs === "number") {
-          const outList = outAdj.get(account) ?? [];
-          const horizon = endTs + VELOCITY_HOURS * 60 * 60 * 1000;
-          let outSum = 0;
-          for (const ot of outList) {
-            if (ot.ts >= endTs && ot.ts <= horizon) outSum += ot.amount;
-          }
-          if (incomingSum > 0 && outSum / incomingSum >= 0.9) velocityBoost = 15;
-        }
-
-        rings.push({
-          id: deterministicRingId(
-            `smurf|${mode}|${account}|${counterparties.slice().sort().join(",")}|${startTs ?? ""}|${endTs ?? ""}`,
-          ),
-          pattern_type: mode === "fan_out" ? "dispersal" : "smurfing",
-          members,
-          member_count: members.length,
-          risk_score: 60 + Math.min(20, freq.size) + velocityBoost,
-          evidence: {
-            transaction_ids: windowTx.map((t) => t.txId),
-            start_timestamp: startTs,
-            end_timestamp: endTs,
-          },
-        });
-        return;
-      }
+      retractInL(iL);
+      iL += 1;
     }
-  };
-
-  for (const [sender, list] of outAdj.entries()) {
-    if (list.length >= THRESH) detect(sender, list, "fan_out");
-  }
-  for (const [receiver, list] of inAdj.entries()) {
-    if (list.length >= THRESH) detect(receiver, list, "fan_in");
   }
 
   return rings;
 }
 
-function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { totalCount: number }>) {
+function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { totalCount: number; inCount?: number; outCount?: number }>) {
   const rings: FraudRing[] = [];
   const low = new Set<string>();
   for (const [id, s] of stats.entries()) {
-    if (s.totalCount === 2 || s.totalCount === 3) low.add(id);
+    const inC = typeof s.inCount === "number" ? s.inCount : 0;
+    const outC = typeof s.outCount === "number" ? s.outCount : 0;
+    const totalDegree = inC + outC;
+    if (totalDegree <= 2) low.add(id);
   }
 
   const MAX_DEPTH = 6;

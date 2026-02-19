@@ -9,6 +9,7 @@ export type TxRow = {
 export type GraphNode = {
   id: string;
   score: number;
+  centrality?: number;
   flags: {
     cycle: boolean;
     smurfing: boolean;
