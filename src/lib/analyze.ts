@@ -1,4 +1,4 @@
-import { canonicalCycle, ringId } from "@/lib/utils";
+import { canonicalCycle, deterministicRingId } from "@/lib/utils";
 import type { AnalysisReport, FraudRing, GraphEdge, GraphNode, TxRow } from "@/lib/types";
 
 type AdjTx = {
@@ -163,7 +163,7 @@ function detectCycles(outAdj: Map<string, AdjTx[]>) {
           if (sig && !seen.has(sig)) {
             seen.add(sig);
             rings.push({
-              id: ringId("cycle"),
+              id: deterministicRingId(`cycle|${sig}`),
               pattern_type: "circular_routing",
               members: cycleNodes.slice(0, -1),
               member_count: cycleNodes.length - 1,
@@ -264,7 +264,9 @@ function detectSmurfing(outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]
         }
 
         rings.push({
-          id: ringId("smurf"),
+          id: deterministicRingId(
+            `smurf|${mode}|${account}|${counterparties.slice().sort().join(",")}|${startTs ?? ""}|${endTs ?? ""}`,
+          ),
           pattern_type: mode === "fan_out" ? "dispersal" : "smurfing",
           members,
           member_count: members.length,
@@ -331,7 +333,7 @@ function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { total
           if (!seen.has(sig)) {
             seen.add(sig);
             rings.push({
-              id: ringId("layer"),
+              id: deterministicRingId(`layer|${sig}`),
               pattern_type: "layered_shell",
               members: path.slice(),
               member_count: path.length,

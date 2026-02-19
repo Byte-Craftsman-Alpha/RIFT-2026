@@ -446,10 +446,11 @@ export default function Dashboard() {
               <table className="w-full text-left text-xs">
                 <thead className="sticky top-0 bg-zinc-50 text-zinc-600">
                   <tr>
-                    <th className="px-3 py-2">Pattern</th>
-                    <th className="px-3 py-2">Members</th>
-                    <th className="px-3 py-2">Risk</th>
-                    <th className="px-3 py-2">Evidence</th>
+                    <th className="px-3 py-2">Ring ID</th>
+                    <th className="px-3 py-2">Pattern Type</th>
+                    <th className="px-3 py-2">Member Count</th>
+                    <th className="px-3 py-2">Risk Score</th>
+                    <th className="px-3 py-2">Member Account IDs</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -461,13 +462,11 @@ export default function Dashboard() {
                         className={`cursor-pointer border-t border-zinc-100 ${active ? "bg-emerald-50" : "hover:bg-zinc-50"}`}
                         onClick={() => setSelectedRingId((prev) => (prev === r.id ? null : r.id))}
                       >
-                        <td className="px-3 py-2 font-medium text-zinc-900">{r.pattern_type}</td>
+                        <td className="px-3 py-2 font-medium text-zinc-900">{r.id}</td>
+                        <td className="px-3 py-2">{r.pattern_type}</td>
                         <td className="px-3 py-2">{r.member_count}</td>
                         <td className="px-3 py-2">{Math.round(r.risk_score)}</td>
-                        <td className="px-3 py-2 text-zinc-600">
-                          tx={r.evidence.transaction_ids.length}
-                          {typeof r.evidence.hops === "number" ? `, hops=${r.evidence.hops}` : ""}
-                        </td>
+                        <td className="px-3 py-2 text-zinc-600">{r.members.join(", ")}</td>
                       </tr>
                     );
                   })}

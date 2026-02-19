@@ -28,15 +28,28 @@ export type ExportJson = {
 };
 
 function mapPatternType(r: FraudRing): string {
+  if (r.pattern_type === "circular_routing") return "cycle";
+  if (r.pattern_type === "smurfing" || r.pattern_type === "dispersal") return "smurfing";
+  if (r.pattern_type === "layered_shell") return "layered_shell";
   return r.pattern_type;
 }
 
-function mapDetectedPattern(r: FraudRing): string {
-  if (r.pattern_type === "circular_routing") return "cycle";
-  if (r.pattern_type === "smurfing") return "smurfing";
-  if (r.pattern_type === "dispersal") return "dispersal";
-  if (r.pattern_type === "layered_shell") return "layered_shell";
-  return r.pattern_type;
+function baseSmurfRisk(r: FraudRing) {
+  const counterparties = Math.max(0, r.member_count - 1);
+  return 60 + Math.min(20, counterparties);
+}
+
+function detectedPatternsForRing(r: FraudRing): string[] {
+  if (r.pattern_type === "circular_routing") {
+    return [`cycle_length_${r.member_count}`];
+  }
+  if (r.pattern_type === "smurfing" || r.pattern_type === "dispersal") {
+    const patterns: string[] = ["smurfing"];
+    if (r.pattern_type === "smurfing" && r.risk_score > baseSmurfRisk(r) + 5) patterns.push("high_velocity");
+    return patterns;
+  }
+  if (r.pattern_type === "layered_shell") return ["layered_shell"];
+  return [];
 }
 
 function scoreFloat(n: number): number {
@@ -73,9 +86,11 @@ export function buildExportJson(params: {
       const ring_id = rings[0]?.id ?? "";
 
       const patterns = new Set<string>();
-      for (const r of rings) patterns.add(mapDetectedPattern(r));
+      for (const r of rings) {
+        for (const p of detectedPatternsForRing(r)) patterns.add(p);
+      }
       if (patterns.size === 0) {
-        if (a.flags.cycle) patterns.add("cycle");
+        if (a.flags.cycle) patterns.add("cycle_length_3");
         if (a.flags.smurfing) patterns.add("smurfing");
         if (a.flags.layering) patterns.add("layered_shell");
       }

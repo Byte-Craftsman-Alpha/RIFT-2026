@@ -55,8 +55,21 @@ export function toEpochMs(ts: unknown): number | null {
   return null;
 }
 
+function stableHashHex(s: string) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+export function deterministicRingId(seed: string) {
+  return `RING_${stableHashHex(seed)}`;
+}
+
 export function ringId(prefix: string) {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+  return deterministicRingId(prefix);
 }
 
 export function canonicalCycle(nodes: string[]): string {
