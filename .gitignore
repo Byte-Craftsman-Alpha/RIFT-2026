@@ -10,6 +10,12 @@
 !.yarn/releases
 !.yarn/versions
 
+# package managers
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
 # testing
 /coverage
 
@@ -17,24 +23,35 @@
 /.next/
 /out/
 
+# next.js cache
+.next/cache/
+
 # production
 /build
 
+# build tools
+.turbo/
+.swc/
+
 # misc
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.pem
 
 # debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
+*.log
+.eslintcache
 
 # env files (can opt-in for committing if needed)
 .env*
 
 # vercel
 .vercel
+
+# editors
+.vscode/
+.idea/
 
 # typescript
 *.tsbuildinfo

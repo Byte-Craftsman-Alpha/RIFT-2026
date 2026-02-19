@@ -1,36 +1,76 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Financial Forensics Engine (Money Muling Detection)
 
-## Getting Started
+A web-based Financial Forensics Engine that ingests a transaction CSV, detects money-muling patterns using graph algorithms, visualizes the directed flow graph, and exports a standardized JSON report.
 
-First, run the development server:
+## MVP features
+
+- **Circular routing (cycles)**
+  - Detect directed cycles of length **3 to 5** (e.g., A → B → C → A).
+- **Smurfing (fan-in / fan-out)**
+  - Detect **aggregators** (10+ distinct senders to 1 receiver) and **dispersers** (1 sender to 10+ distinct receivers) within a **72-hour** window.
+- **Layered shell networks**
+  - Detect chains of **3+ hops** where intermediate accounts have very low transaction counts (**2–3 total**).
+- **Interactive UI**
+  - CSV upload
+  - Graph visualization with suspicious nodes highlighted
+  - Fraud summary table (click to highlight ring members on the graph)
+- **JSON export**
+  - Download button exports `report` JSON with `suspicious_accounts` and `fraud_rings`.
+
+## Input CSV format
+
+Required columns:
+
+- `transaction_id`
+- `sender_id`
+- `receiver_id`
+- `amount`
+- `timestamp`
+
+`timestamp` can be an ISO string (recommended) or a numeric epoch value.
+
+Sample file:
+
+- `public/sample-transactions.csv`
+
+## Local development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- http://localhost:3000
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## API
 
-## Learn More
+### `POST /api/analyze`
 
-To learn more about Next.js, take a look at the following resources:
+Upload the CSV as `multipart/form-data` with field name `file`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Response:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `graph.nodes[]`: accounts with suspicion `score` and pattern flags
+- `graph.edges[]`: aggregated sender→receiver edges with total `amount` and `count`
+- `report.suspicious_accounts[]`: list of accounts with suspicion scores
+- `report.fraud_rings[]`: detected rings/chains with pattern type + evidence
 
-## Deploy on Vercel
+## Deployment (Vercel)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- Push this repo to GitHub.
+- In Vercel, click **New Project** and import the repo.
+- Build command: `npm run build`
+- Output: Next.js default
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Hackathon checklist
+
+- **Live URL** (no auth)
+- **README** (this file)
+- **2–3 minute demo video** showing upload → detections → graph → JSON download
+
+## Notes
+
+- This repo includes heuristic risk scoring and deduping; tune thresholds in `src/lib/analyze.ts` if needed.
+- If the evaluator requires a different JSON schema, adjust the `report` object returned by `/api/analyze`.
