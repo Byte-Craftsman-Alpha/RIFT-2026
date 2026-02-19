@@ -27,6 +27,8 @@ export async function POST(req: Request) {
 
     const result = analyzeTransactions(rows);
 
+    const timeline = rows.slice().sort((a, b) => a.timestamp - b.timestamp);
+
     const processingTimeSeconds = (performance.now() - t0) / 1000;
     const export_json = buildExportJson({
       report: result.report,
@@ -37,6 +39,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         ...result,
+        timeline,
         export_json,
         meta: {
           parsed_transactions: rows.length,

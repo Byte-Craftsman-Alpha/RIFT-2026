@@ -56,5 +56,6 @@ export type AnalyzeResponse = {
     edges: GraphEdge[];
   };
   report: AnalysisReport;
+  timeline?: TxRow[];
   export_json?: unknown;
 };

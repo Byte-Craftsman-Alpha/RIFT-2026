@@ -197,18 +197,24 @@ function detectCycles(outAdj: Map<string, AdjTx[]>) {
 function detectSmurfing(outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]>) {
   const WINDOW_MS = 72 * 60 * 60 * 1000;
   const THRESH = 10;
+  const SMALL_TX_THRESHOLD = 1000;
+  const SMALL_TX_RATIO = 0.7;
+  const VELOCITY_HOURS = 6;
   const rings: FraudRing[] = [];
 
   const detect = (account: string, list: AdjTx[], mode: "fan_out" | "fan_in") => {
     let left = 0;
     const freq = new Map<string, number>();
-    const txIds: string[] = [];
+    const cpSmallCount = new Map<string, number>();
 
     for (let right = 0; right < list.length; right++) {
       const tx = list[right];
       const counterparty = tx.to;
       freq.set(counterparty, (freq.get(counterparty) ?? 0) + 1);
-      txIds.push(tx.txId);
+
+      if (tx.amount <= SMALL_TX_THRESHOLD) {
+        cpSmallCount.set(counterparty, (cpSmallCount.get(counterparty) ?? 0) + 1);
+      }
 
       while (list[right].ts - list[left].ts > WINDOW_MS) {
         const old = list[left];
@@ -216,22 +222,57 @@ function detectSmurfing(outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[]
         const n = (freq.get(oldCp) ?? 0) - 1;
         if (n <= 0) freq.delete(oldCp);
         else freq.set(oldCp, n);
+
+        if (old.amount <= SMALL_TX_THRESHOLD) {
+          const sn = (cpSmallCount.get(oldCp) ?? 0) - 1;
+          if (sn <= 0) cpSmallCount.delete(oldCp);
+          else cpSmallCount.set(oldCp, sn);
+        }
         left += 1;
       }
 
       if (freq.size >= THRESH) {
+        if (mode === "fan_in") {
+          // Structuring bias: require most counterparties in-window are sending small transfers.
+          let smallCps = 0;
+          for (const cp of freq.keys()) {
+            if ((cpSmallCount.get(cp) ?? 0) > 0) smallCps += 1;
+          }
+          const ratio = freq.size === 0 ? 0 : smallCps / freq.size;
+          if (ratio < SMALL_TX_RATIO) {
+            continue;
+          }
+        }
+
         const counterparties = Array.from(freq.keys());
         const members = mode === "fan_out" ? [account, ...counterparties] : [...counterparties, account];
+
+        const windowTx = list.slice(left, right + 1);
+        const startTs = windowTx[0]?.ts;
+        const endTs = windowTx[windowTx.length - 1]?.ts;
+        const incomingSum = windowTx.reduce((acc, t) => acc + t.amount, 0);
+
+        let velocityBoost = 0;
+        if (mode === "fan_in" && typeof endTs === "number") {
+          const outList = outAdj.get(account) ?? [];
+          const horizon = endTs + VELOCITY_HOURS * 60 * 60 * 1000;
+          let outSum = 0;
+          for (const ot of outList) {
+            if (ot.ts >= endTs && ot.ts <= horizon) outSum += ot.amount;
+          }
+          if (incomingSum > 0 && outSum / incomingSum >= 0.9) velocityBoost = 15;
+        }
+
         rings.push({
           id: ringId("smurf"),
           pattern_type: mode === "fan_out" ? "dispersal" : "smurfing",
           members,
           member_count: members.length,
-          risk_score: 60 + Math.min(20, freq.size),
+          risk_score: 60 + Math.min(20, freq.size) + velocityBoost,
           evidence: {
-            transaction_ids: list.slice(left, right + 1).map((t) => t.txId),
-            start_timestamp: list[left].ts,
-            end_timestamp: list[right].ts,
+            transaction_ids: windowTx.map((t) => t.txId),
+            start_timestamp: startTs,
+            end_timestamp: endTs,
           },
         });
         return;
@@ -257,13 +298,14 @@ function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { total
   }
 
   const MAX_DEPTH = 6;
+  const MAX_GAP_MS = 72 * 60 * 60 * 1000;
   const seen = new Set<string>();
 
   for (const start of outAdj.keys()) {
     const path: string[] = [start];
     const txIds: string[] = [];
 
-    const dfs = (current: string, depth: number) => {
+    const dfs = (current: string, depth: number, lastTs: number) => {
       if (depth > MAX_DEPTH) return;
       const outs = outAdj.get(current);
       if (!outs) return;
@@ -273,6 +315,9 @@ function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { total
         const isIntermediate = depth >= 1;
         if (isIntermediate && !low.has(current) && current !== start) continue;
         if (path.includes(next)) continue;
+
+        if (e.ts < lastTs) continue;
+        if (e.ts - lastTs > MAX_GAP_MS) continue;
 
         path.push(next);
         txIds.push(e.txId);
@@ -299,14 +344,14 @@ function detectLayering(outAdj: Map<string, AdjTx[]>, stats: Map<string, { total
           }
         }
 
-        dfs(next, depth + 1);
+        dfs(next, depth + 1, e.ts);
 
         path.pop();
         txIds.pop();
       }
     };
 
-    dfs(start, 1);
+    dfs(start, 1, Number.NEGATIVE_INFINITY);
   }
 
   return rings;

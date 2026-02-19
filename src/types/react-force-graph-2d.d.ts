@@ -12,6 +12,7 @@ declare module "react-force-graph-2d" {
     linkDirectionalArrowLength?: number;
     linkDirectionalArrowRelPos?: number;
     nodeCanvasObject?: (node: unknown, ctx: CanvasRenderingContext2D, globalScale: number) => void;
+    onNodeClick?: (node: unknown) => void;
   } & React.CanvasHTMLAttributes<HTMLCanvasElement>;
 
   const ForceGraph2D: React.ComponentType<ForceGraphProps>;
