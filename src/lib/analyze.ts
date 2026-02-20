@@ -106,7 +106,7 @@ export function analyzeTransactions(rows: TxRow[]) {
   for (const [id, f] of accountFlags.entries()) {
     let s = (f.cycle ? 80 : 0) + (f.layering ? 40 : 0);
     const roles = smurfRolesByAccount.get(id);
-    if (roles?.has("aggregator")) s += 50;
+    if (roles?.has("aggregator")) s += 85;
     else if (roles?.has("sender")) s += 25;
     else if (roles?.has("receiver")) s += 10;
     else if (f.smurfing) s += 25;
@@ -325,13 +325,16 @@ function detectSmurfing(_outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[
   const WINDOW_MS = 72 * 60 * 60 * 1000;
   const IN_UNIQUE_MIN = 10;
   const rings: FraudRing[] = [];
+  const seenReceivers = new Set<string>();
 
   for (const [receiver, insRaw] of inAdj.entries()) {
     const ins = insRaw.slice();
     if (ins.length < IN_UNIQUE_MIN) continue;
 
+    // Sliding window to find the best 72h window with maximum unique senders
     let left = 0;
     const freq = new Map<string, number>();
+    let bestWindow: { left: number; right: number; senders: string[] } | null = null;
 
     for (let right = 0; right < ins.length; right++) {
       const tx = ins[right]!;
@@ -346,30 +349,37 @@ function detectSmurfing(_outAdj: Map<string, AdjTx[]>, inAdj: Map<string, AdjTx[
       }
 
       if (freq.size >= IN_UNIQUE_MIN) {
-        const senders = Array.from(freq.keys()).slice().sort();
-        const windowTx = ins.slice(left, right + 1);
-        const startTs = windowTx[0]?.ts;
-        const endTs = windowTx[windowTx.length - 1]?.ts;
-        const txIds = windowTx.map((t) => t.txId);
-        const members = [...senders, receiver];
-        const totalIn = windowTx.reduce((acc, t) => acc + t.amount, 0);
-
-        rings.push({
-          id: deterministicRingId(`fanin|${receiver}|${senders.join(",")}|${startTs ?? ""}|${endTs ?? ""}`),
-          pattern_type: "smurfing",
-          members,
-          member_count: members.length,
-          risk_score: 80 + Math.min(20, senders.length),
-          evidence: {
-            transaction_ids: Array.from(new Set(txIds)),
-            start_timestamp: startTs,
-            end_timestamp: endTs,
-            total_amount: totalIn,
-            roles: { aggregator: receiver, senders },
-          } as FraudRing["evidence"] & { roles: { aggregator: string; senders: string[] } },
-        });
-        break;
+        const senders = Array.from(freq.keys());
+        if (!bestWindow || senders.length > bestWindow.senders.length) {
+          bestWindow = { left, right, senders };
+        }
       }
+    }
+
+    if (bestWindow && !seenReceivers.has(receiver)) {
+      seenReceivers.add(receiver);
+      const senders = bestWindow.senders.slice().sort();
+      const windowTx = ins.slice(bestWindow.left, bestWindow.right + 1);
+      const startTs = windowTx[0]?.ts;
+      const endTs = windowTx[windowTx.length - 1]?.ts;
+      const txIds = windowTx.map((t) => t.txId);
+      const members = [...senders, receiver];
+      const totalIn = windowTx.reduce((acc, t) => acc + t.amount, 0);
+
+      rings.push({
+        id: deterministicRingId(`fanin|${receiver}|${senders.join(",")}|${startTs ?? ""}|${endTs ?? ""}`),
+        pattern_type: "smurfing",
+        members,
+        member_count: members.length,
+        risk_score: 80 + Math.min(20, senders.length),
+        evidence: {
+          transaction_ids: Array.from(new Set(txIds)),
+          start_timestamp: startTs,
+          end_timestamp: endTs,
+          total_amount: totalIn,
+          roles: { aggregator: receiver, senders },
+        } as FraudRing["evidence"] & { roles: { aggregator: string; senders: string[] } },
+      });
     }
   }
 
